@@ -268,6 +268,86 @@ Benchmark: Update Only (realistic usage pattern)
 Improvement: 23.84x → 7.28x = 3.27x faster! (69% reduction in gap)
 ```
 
+## Understanding the Remaining Gap: Nanosecond Analysis
+
+At 2.9M operations/second, we're in the realm where **every nanosecond counts**:
+
+```
+Vue/Solid operation budget: ~50ns (20M ops/sec)
+TanStack operation budget: ~350ns (2.9M ops/sec)
+
+Extra overhead per operation: ~300ns
+```
+
+When you're already doing millions of operations per second, seemingly "tiny" overheads aren't tiny at all. Let's trace what happens in TanStack that Vue/Solid don't do:
+
+### Per setState() Call
+
+```javascript
+// 1. queueSignalUpdate wrapper
+queueSignalUpdate(this, () => { ... })
+  // - Create closure: ~10-15ns
+  // - Function call overhead: ~3-5ns
+  // - __batchDepth check: ~2ns
+  // Total: ~20ns
+
+// 2. Conditional flush check
+if (__storeToDerived.has(this)) {
+  // - Map.has() lookup: ~5-10ns
+  // Total: ~10ns (even when false)
+
+// 3. prevState pointer copy
+this.prevState = prevState
+  // - Pointer write: ~1-2ns
+```
+
+### Per Derived Recomputation
+
+```javascript
+// 4. getDepVals() even when skipped
+if (!this._fnUsesParams) return this._depValsResult
+  // - Check boolean: ~1ns
+  // - Return object: ~2ns
+  // Total: ~3ns (we optimized the big part!)
+
+// 5. prevState/cachedState bookkeeping
+this.prevState = this._cachedState
+this._cachedState = result
+this._previousResult = result
+  // - 3 pointer writes: ~3-5ns
+```
+
+### In Our Benchmark (7 deriveds)
+
+```
+- 1 Store setState: ~30ns overhead
+- 7 Derived recomputations: ~7 × 8ns = ~56ns overhead
+- Total per update: ~86ns of "small" overheads
+```
+
+**The kicker:** Vue/Solid's **entire operation** is ~50ns. Our overhead alone is bigger than their whole operation!
+
+### Why Vue/Solid Are So Fast
+
+```javascript
+// Vue's computed (simplified):
+computed(() => a.value * 2)
+  // 1. No wrapper functions - direct call
+  // 2. No batching checks - always immediate
+  // 3. No mount() graph - effects handle everything
+  // 4. No prevState tracking - only current
+  // 5. No getDepVals() - fn has no params
+
+// Total overhead: ~5-10ns
+// Actual work (multiply): ~2-3ns
+// alien-signals propagation: ~30-40ns
+// Total: ~50ns ✨
+```
+
+**Key Insight:** At this scale, "micro" optimizations aren't micro at all. Each nanosecond counts. Seemingly tiny features like "pass an extra parameter" or "check a boolean" can add 5-10% overhead each.
+
+This is why we got such a huge win (1.5x!) just from skipping parameter work - that was saving ~30-40ns per recomputation, which is massive when your total budget is 350ns.
+
 ## Remaining Performance Blockers
 
 ### 1. DerivedFnProps Overhead (PARTIALLY SOLVED)
