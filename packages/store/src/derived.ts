@@ -1,3 +1,4 @@
+import { computed } from 'alien-signals'
 import { Store } from './store'
 import { __derivedToStore, __storeToDerived } from './scheduler'
 import type { Listener } from './types'
@@ -26,13 +27,11 @@ type UnwrapReadonlyDerivedOrStoreArray<
       ? Array<UnwrapDerivedOrStore<TArr[number]>>
       : []
 
-// Can't have currVal, as it's being evaluated from the current derived fn
 export interface DerivedFnProps<
   TArr extends ReadonlyArray<Derived<any> | Store<any>> = ReadonlyArray<any>,
   TUnwrappedArr extends
     UnwrapReadonlyDerivedOrStoreArray<TArr> = UnwrapReadonlyDerivedOrStoreArray<TArr>,
 > {
-  // `undefined` if it's the first run
   /**
    * `undefined` if it's the first run
    * @privateRemarks this also cannot be typed as TState, as it breaks the inferencing of the function's return type when an argument is used - even with `NoInfer` usage
@@ -65,9 +64,11 @@ export class Derived<
   > = ReadonlyArray<any>,
 > {
   listeners = new Set<Listener<TState>>()
-  state: TState
+  private _computed: ReturnType<typeof computed<TState>>
+  private _cachedState: TState
   prevState: TState | undefined
   options: DerivedOptions<TState, TArr>
+  private _isFirstRun = true
 
   /**
    * Functions representing the subscriptions. Call a function to cleanup
@@ -87,7 +88,7 @@ export class Derived<
     }
     this.lastSeenDepValues = currDepVals
     return {
-      prevDepVals,
+      prevDepVals: this._isFirstRun ? undefined : prevDepVals,
       currDepVals,
       prevVal: this.prevState ?? undefined,
     }
@@ -95,11 +96,20 @@ export class Derived<
 
   constructor(options: DerivedOptions<TState, TArr>) {
     this.options = options
-    this.state = options.fn({
-      prevDepVals: undefined,
-      prevVal: undefined,
-      currDepVals: this.getDepVals().currDepVals as never,
+
+    this._computed = computed(() => {
+      const depVals = this.getDepVals()
+      const result = options.fn(depVals as never)
+      this._isFirstRun = false
+      return result
     })
+
+    this._cachedState = this._computed()
+  }
+
+  get state(): TState {
+    this._cachedState = this._computed()
+    return this._cachedState
   }
 
   registerOnGraph(
@@ -108,12 +118,9 @@ export class Derived<
     const toSort = new Set<Array<Derived<unknown>>>()
     for (const dep of deps) {
       if (dep instanceof Derived) {
-        // First register the intermediate derived value if it's not already registered
         dep.registerOnGraph()
-        // Then register this derived with the dep's underlying stores
         this.registerOnGraph(dep.options.deps)
       } else if (dep instanceof Store) {
-        // Register the derived as related derived to the store
         let relatedLinkedDerivedVals = __storeToDerived.get(dep)
         if (!relatedLinkedDerivedVals) {
           relatedLinkedDerivedVals = [this as never]
@@ -123,7 +130,6 @@ export class Derived<
           toSort.add(relatedLinkedDerivedVals)
         }
 
-        // Register the store as a related store to this derived
         let relatedStores = __derivedToStore.get(this as never)
         if (!relatedStores) {
           relatedStores = new Set()
@@ -133,11 +139,8 @@ export class Derived<
       }
     }
     for (const arr of toSort) {
-      // First sort deriveds by dependency order
       arr.sort((a, b) => {
-        // If a depends on b, b should go first
         if (a instanceof Derived && a.options.deps.includes(b)) return 1
-        // If b depends on a, a should go first
         if (b instanceof Derived && b.options.deps.includes(a)) return -1
         return 0
       })
@@ -168,9 +171,8 @@ export class Derived<
   }
 
   recompute = () => {
-    this.prevState = this.state
-    const depVals = this.getDepVals()
-    this.state = this.options.fn(depVals as never)
+    this.prevState = this._cachedState
+    this._cachedState = this._computed()
 
     this.options.onUpdate?.()
   }

@@ -1,3 +1,4 @@
+import { signal } from 'alien-signals'
 import { __flush } from './scheduler'
 import { isUpdaterFunction } from './types'
 import type { AnyUpdater, Listener, Updater } from './types'
@@ -30,14 +31,22 @@ export class Store<
   TUpdater extends AnyUpdater = (cb: TState) => TState,
 > {
   listeners = new Set<Listener<TState>>()
-  state: TState
+  private _signal: ReturnType<typeof signal<TState>>
   prevState: TState
   options?: StoreOptions<TState, TUpdater>
 
   constructor(initialState: TState, options?: StoreOptions<TState, TUpdater>) {
     this.prevState = initialState
-    this.state = initialState
+    this._signal = signal(initialState)
     this.options = options
+  }
+
+  get state(): TState {
+    return this._signal()
+  }
+
+  set state(value: TState) {
+    this._signal(value)
   }
 
   subscribe = (listener: Listener<TState>) => {

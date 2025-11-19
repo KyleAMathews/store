@@ -1,16 +1,14 @@
+import { effect as alienEffect, effectScope } from 'alien-signals'
 import { Derived } from './derived'
-import type { DerivedOptions } from './derived'
+import type { Store } from './store'
 
-interface EffectOptions
-  extends Omit<
-    DerivedOptions<unknown>,
-    'onUpdate' | 'onSubscribe' | 'lazy' | 'fn'
-  > {
+interface EffectOptions {
   /**
    * Should the effect trigger immediately?
    * @default false
    */
   eager?: boolean
+  deps: ReadonlyArray<Derived<any> | Store<any>>
   fn: () => void
 }
 
@@ -18,25 +16,38 @@ export class Effect {
   /**
    * @private
    */
-  _derived: Derived<void>
+  private _stopEffect: (() => void) | null = null
+  private options: EffectOptions
 
   constructor(opts: EffectOptions) {
-    const { eager, fn, ...derivedProps } = opts
+    this.options = opts
 
-    this._derived = new Derived({
-      ...derivedProps,
-      fn: () => {},
-      onUpdate() {
-        fn()
-      },
-    })
-
-    if (eager) {
-      fn()
+    if (opts.eager) {
+      opts.fn()
     }
   }
 
   mount() {
-    return this._derived.mount()
+    let isFirstRun = true
+
+    this._stopEffect = effectScope(() => {
+      alienEffect(() => {
+        for (const dep of this.options.deps) {
+          dep.state
+        }
+
+        if (isFirstRun) {
+          isFirstRun = false
+          return
+        }
+
+        this.options.fn()
+      })
+    })
+
+    return () => {
+      this._stopEffect?.()
+      this._stopEffect = null
+    }
   }
 }
