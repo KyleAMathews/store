@@ -83,8 +83,13 @@ export class Derived<
   private _prevDepValsArray: Array<unknown>
   private _currDepValsArray: Array<unknown>
   private _depValsResult: DerivedFnProps<TArr>
+  private _fnUsesParams: boolean
 
   getDepVals = () => {
+    // Fast path: if fn doesn't use params, skip all the work
+    if (!this._fnUsesParams) {
+      return this._depValsResult
+    }
     const l = this.options.deps.length
     // Reuse arrays - just update contents
     for (let i = 0; i < l; i++) {
@@ -104,6 +109,10 @@ export class Derived<
 
   constructor(options: DerivedOptions<TState, TArr>) {
     this.options = options
+
+    // Detect if fn uses the params parameter
+    // If fn.length === 0, it doesn't accept any parameters
+    this._fnUsesParams = options.fn.length > 0
 
     // Initialize reusable arrays
     const l = options.deps.length

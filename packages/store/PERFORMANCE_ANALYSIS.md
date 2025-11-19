@@ -2,12 +2,12 @@
 
 ## Executive Summary
 
-Successfully integrated alien-signals into @tanstack/store with **2.2x performance improvement** (54% reduction in performance gap) while maintaining 100% API compatibility and all 36 tests passing.
+Successfully integrated alien-signals into @tanstack/store with **3.27x performance improvement** (69% reduction in performance gap) while maintaining 100% API compatibility and all 36 tests passing.
 
 **Performance Journey:**
 - **Before:** 23.84x slower than Solid/Angular
-- **After:** 10.84x slower than Solid/Angular
-- **Improvement:** 2.2x faster (54% reduction in gap)
+- **After:** 7.28x slower than Solid/Angular
+- **Improvement:** 3.27x faster (69% reduction in gap)
 
 ## Initial State
 
@@ -210,22 +210,67 @@ getDepVals = () => {
 
 **Result:** Performance improved from 12.3x slower to **10.84x slower** - another 12% gain!
 
+### Phase 6: Auto-Detect Unused Parameters
+
+**Discovery:** We always call `getDepVals()` even when the function doesn't use the parameter:
+
+```typescript
+// Benchmark function (ignores params):
+fn: () => tanstack_a.state  // length === 0
+
+// But we still create arrays:
+getDepVals() {
+  const prevDepVals = new Array(l)  // Wasted work!
+  const currDepVals = new Array(l)  // Wasted work!
+  // ... populate arrays ...
+  return { prevDepVals, currDepVals, prevVal }
+}
+```
+
+**Solution:** Check `fn.length` to detect if function accepts parameters:
+
+```typescript
+constructor(options) {
+  // Detect if fn uses the params parameter
+  // If fn.length === 0, it doesn't accept any parameters
+  this._fnUsesParams = options.fn.length > 0
+}
+
+getDepVals = () => {
+  // Fast path: if fn doesn't use params, skip all the work
+  if (!this._fnUsesParams) {
+    return this._depValsResult  // Return cached empty object
+  }
+  // Slow path: populate arrays only when needed
+  // ...
+}
+```
+
+**How it works:**
+```javascript
+(() => x).length === 0           // No params
+((props) => x).length === 1      // Uses params
+(({ prevVal }) => x).length === 1 // Uses destructured params
+```
+
+**Result:** Performance improved from 10.84x slower to **7.28x slower** - another 1.49x gain!
+
 ## Final Performance Results
 
 ```
 Benchmark: Update Only (realistic usage pattern)
 - Angular:   ~20.9M ops/sec (baseline)
-- Solid:     ~20.0M ops/sec (1.04x slower than Angular)
-- Vue:        ~4.3M ops/sec (4.87x slower than Angular)
-- Preact:     ~3.9M ops/sec (5.56x slower than Angular)
-- TanStack:   ~1.9M ops/sec (10.84x slower than Angular)
+- Solid:     ~20.0M ops/sec (1.06x slower than Angular)
+- Vue:        ~4.2M ops/sec (4.94x slower than Angular)
+- Preact:     ~3.6M ops/sec (5.73x slower than Angular)
+- TanStack:   ~2.9M ops/sec (7.28x slower than Angular)
 
-Improvement: 23.84x → 10.84x = 2.2x faster!
+Improvement: 23.84x → 7.28x = 3.27x faster! (69% reduction in gap)
 ```
 
 ## Remaining Performance Blockers
 
-### 1. DerivedFnProps Overhead
+### 1. DerivedFnProps Overhead (PARTIALLY SOLVED)
 
 **The Issue:** Our Derived fn signature includes rich metadata that Vue/Solid/Angular don't provide:
 
@@ -238,23 +283,17 @@ fn: (props: DerivedFnProps) => TState
 fn: () => TState  // No parameters at all
 ```
 
-Even with array reuse, we still:
-- Loop through all deps to populate arrays
-- Create the result object structure
-- Pass it to the function (even if unused)
+**Solution Applied:** Auto-detect if function uses parameters via `fn.length`:
+- If `fn.length === 0`, skip all array population work
+- If `fn.length > 0`, do the full getDepVals() work
+- This gives ~1.5x speedup for functions that don't use params!
 
-**Benchmark functions don't even use these values:**
-```typescript
-// Typical benchmark derived:
-new Derived({
-  deps: [a],
-  fn: () => a.state  // Ignores the props parameter entirely!
-})
-```
+**Remaining Cost:** For functions that DO use params (e.g., `({ prevVal }) => ...`):
+- Still need to loop through deps and populate arrays
+- Still need to maintain prevState on all nodes
+- Still ~20-30% overhead vs Vue/Solid's simpler model
 
-**Cost:** The loop, array writes, and object field updates add ~20-30% overhead vs just calling `fn()`.
-
-**To eliminate:** Would need breaking change to make props optional or remove entirely.
+**To fully eliminate:** Would need breaking change to remove DerivedFnProps entirely.
 
 ### 2. prevState Tracking Overhead
 
@@ -410,13 +449,14 @@ But this would be a **completely different library** - essentially becoming a Vu
 
 ### For Current Codebase (No Breaking Changes)
 
-**We achieved the maximum possible improvement without breaking changes:**
-- ✅ 2.2x performance improvement (54% reduction in gap)
+**We achieved excellent improvement without breaking changes:**
+- ✅ 3.27x performance improvement (69% reduction in gap)
 - ✅ All 36 tests passing
 - ✅ Zero API changes
 - ✅ Realistic benchmark pattern
+- ✅ Auto-detects unused parameters for optimal performance
 
-**Remaining optimizations are micro-optimizations with <5% gains each.**
+**Remaining optimizations would require API changes or have <5% gains each.**
 
 ### For Future Major Version (Breaking Changes Allowed)
 
@@ -499,12 +539,13 @@ Supporting `mount()` without `subscribe()` requires maintaining an entire parall
 
 ## Conclusion
 
-We achieved a **2.2x performance improvement** while maintaining 100% backward compatibility. The remaining 10.84x gap is due to fundamental API differences:
+We achieved a **3.27x performance improvement** while maintaining 100% backward compatibility. The remaining 7.28x gap is due to fundamental API differences:
 
-- TanStack Store provides richer metadata (prevDepVals, currDepVals, prevVal)
+- TanStack Store provides richer metadata (prevDepVals, currDepVals, prevVal) - now optimized to skip when unused!
 - TanStack Store supports mount() without subscribe()
 - TanStack Store maintains prevState on all nodes
+- TanStack Store has deferred batching support
 
 These are **feature tradeoffs**, not bugs. To reach full parity would mean removing these features and becoming essentially identical to Vue/Solid.
 
-The current implementation represents the **optimal balance** of performance and features without breaking changes.
+The current implementation represents an **excellent balance** of performance and features without breaking changes. The auto-detection of unused parameters means most real-world code gets near-optimal performance automatically.
