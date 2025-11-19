@@ -1,5 +1,5 @@
 import { effect as alienEffect, effectScope } from 'alien-signals'
-import { Derived } from './derived'
+import type { Derived } from './derived'
 import type { Store } from './store'
 
 interface EffectOptions {
@@ -28,6 +28,10 @@ export class Effect {
   }
 
   mount() {
+    if (this._stopEffect) {
+      this._stopEffect()
+    }
+
     let isFirstRun = true
 
     this._stopEffect = effectScope(() => {
