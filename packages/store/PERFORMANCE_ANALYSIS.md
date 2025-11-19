@@ -290,30 +290,11 @@ fn: () => TState  // No parameters at all
 
 **Remaining Cost:** For functions that DO use params (e.g., `({ prevVal }) => ...`):
 - Still need to loop through deps and populate arrays
-- Still need to maintain prevState on all nodes
 - Still ~20-30% overhead vs Vue/Solid's simpler model
 
 **To fully eliminate:** Would need breaking change to remove DerivedFnProps entirely.
 
-### 2. prevState Tracking Overhead
-
-**The Issue:** Every Store and Derived maintains `prevState` for comparison:
-
-```typescript
-// In Derived's computed callback (runs on EVERY recomputation):
-this.prevState = this._cachedState  // Track previous
-// ... compute new value ...
-this._cachedState = result          // Store new
-this._previousResult = result       // Also track for depVals
-```
-
-Vue/Solid/Angular don't maintain this metadata - they only track current state.
-
-**Cost:** Extra writes on every recomputation, plus memory overhead per node.
-
-**To eliminate:** Would need to remove `prevState` from public API (breaking change).
-
-### 3. mount() Edge Case Support
+### 2. mount() Edge Case Support
 
 **The Issue:** We maintain backward compatibility with `mount()` without `subscribe()`:
 
@@ -336,7 +317,7 @@ This requires:
 
 **To eliminate:** Could make mount() a no-op or deprecate the mount-without-subscribe pattern.
 
-### 4. Batching Infrastructure Overhead
+### 3. Batching Infrastructure Overhead
 
 **The Issue:** Every setState goes through `queueSignalUpdate()`:
 
@@ -543,7 +524,6 @@ We achieved a **3.27x performance improvement** while maintaining 100% backward 
 
 - TanStack Store provides richer metadata (prevDepVals, currDepVals, prevVal) - now optimized to skip when unused!
 - TanStack Store supports mount() without subscribe()
-- TanStack Store maintains prevState on all nodes
 - TanStack Store has deferred batching support
 
 These are **feature tradeoffs**, not bugs. To reach full parity would mean removing these features and becoming essentially identical to Vue/Solid.
