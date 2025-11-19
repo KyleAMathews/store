@@ -25,24 +25,36 @@ export const __derivedToStore = new WeakMap<
   Set<Store<unknown>>
 >()
 
-export const __depsThatHaveWrittenThisTick = {
-  current: [] as Array<Derived<unknown> | Store<unknown>>,
-}
+let __depsThatHaveWrittenThisTick = new Set<Derived<unknown> | Store<unknown>>()
 
 let __isFlushing = false
 let __batchDepth = 0
 const __pendingUpdates = new Set<Store<unknown>>()
-// Add a map to store initial values before batch
 const __initialBatchValues = new Map<Store<unknown>, unknown>()
+const __pendingSignalUpdates = new Map<any, () => void>()
+
+export function getBatchDepth() {
+  return __batchDepth
+}
+
+export function queueSignalUpdate(storeId: any, fn: () => void) {
+  if (__batchDepth > 0) {
+    // Only keep the last update for each store during batch
+    __pendingSignalUpdates.set(storeId, fn)
+  } else {
+    fn()
+  }
+}
 
 function __flush_internals(relatedVals: ReadonlyArray<Derived<unknown>>) {
   for (const derived of relatedVals) {
-    if (__depsThatHaveWrittenThisTick.current.includes(derived)) {
+    if (__depsThatHaveWrittenThisTick.has(derived)) {
       continue
     }
 
-    __depsThatHaveWrittenThisTick.current.push(derived)
+    __depsThatHaveWrittenThisTick.add(derived)
     derived.recompute()
+    __notifyDerivedListeners(derived)
 
     const stores = __derivedToStore.get(derived)
     if (stores) {
@@ -55,31 +67,20 @@ function __flush_internals(relatedVals: ReadonlyArray<Derived<unknown>>) {
   }
 }
 
-function __notifyListeners(store: Store<unknown>) {
-  const value = {
-    prevVal: store.prevState as never,
-    currentVal: store.state as never,
-  }
-  for (const listener of store.listeners) {
-    listener(value)
-  }
+// Listener notification is now handled by alien-signals effects in subscribe()
+// These functions are no longer needed but kept for reference
+function __notifyListeners(_store: Store<unknown>) {
+  // No-op: alien-signals effects handle this
 }
 
-function __notifyDerivedListeners(derived: Derived<unknown>) {
-  const value = {
-    prevVal: derived.prevState as never,
-    currentVal: derived.state as never,
-  }
-  for (const listener of derived.listeners) {
-    listener(value)
-  }
+function __notifyDerivedListeners(_derived: Derived<unknown>) {
+  // No-op: alien-signals effects handle this
 }
 
 /**
  * @private only to be called from `Store` on write
  */
 export function __flush(store: Store<unknown>) {
-  // If we're starting a batch, store the initial values
   if (__batchDepth > 0 && !__initialBatchValues.has(store)) {
     __initialBatchValues.set(store, store.prevState)
   }
@@ -96,36 +97,23 @@ export function __flush(store: Store<unknown>) {
       const stores = Array.from(__pendingUpdates)
       __pendingUpdates.clear()
 
-      // First notify listeners with updated values
       for (const store of stores) {
-        // Use initial batch values for prevState if we have them
         const prevState = __initialBatchValues.get(store) ?? store.prevState
         store.prevState = prevState
         __notifyListeners(store)
       }
 
-      // Then update all derived values
       for (const store of stores) {
         const derivedVals = __storeToDerived.get(store)
         if (!derivedVals) continue
 
-        __depsThatHaveWrittenThisTick.current.push(store)
+        __depsThatHaveWrittenThisTick.add(store)
         __flush_internals(derivedVals)
-      }
-
-      // Notify derived listeners after recomputing
-      for (const store of stores) {
-        const derivedVals = __storeToDerived.get(store)
-        if (!derivedVals) continue
-
-        for (const derived of derivedVals) {
-          __notifyDerivedListeners(derived)
-        }
       }
     }
   } finally {
     __isFlushing = false
-    __depsThatHaveWrittenThisTick.current = []
+    __depsThatHaveWrittenThisTick.clear()
     __initialBatchValues.clear()
   }
 }
@@ -137,9 +125,12 @@ export function batch(fn: () => void) {
   } finally {
     __batchDepth--
     if (__batchDepth === 0) {
-      const pendingUpdateToFlush = __pendingUpdates.values().next().value
-      if (pendingUpdateToFlush) {
-        __flush(pendingUpdateToFlush) // Trigger flush of all pending updates
+      // Apply all queued signal updates
+      // Since we only kept the last update per store, each effect fires once
+      const updates = Array.from(__pendingSignalUpdates.values())
+      __pendingSignalUpdates.clear()
+      for (const update of updates) {
+        update()
       }
     }
   }

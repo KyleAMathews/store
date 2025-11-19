@@ -1,4 +1,4 @@
-import { computed } from 'alien-signals'
+import { computed, effect, effectScope } from 'alien-signals'
 import { Store } from './store'
 import { __derivedToStore, __storeToDerived } from './scheduler'
 import type { Listener } from './types'
@@ -66,6 +66,7 @@ export class Derived<
   listeners = new Set<Listener<TState>>()
   private _computed: ReturnType<typeof computed<TState>>
   private _cachedState: TState
+  private _previousResult: TState | undefined
   prevState: TState | undefined
   options: DerivedOptions<TState, TArr>
   private _isFirstRun = true
@@ -75,41 +76,68 @@ export class Derived<
    * @private
    */
   _subscriptions: Array<() => void> = []
+  private _mountEffect: (() => void) | null = null
 
   lastSeenDepValues: Array<unknown> = []
+  // Reuse these arrays to avoid allocations on every recomputation
+  private _prevDepValsArray: Array<unknown>
+  private _currDepValsArray: Array<unknown>
+  private _depValsResult: DerivedFnProps<TArr>
+
   getDepVals = () => {
     const l = this.options.deps.length
-    const prevDepVals = new Array<unknown>(l)
-    const currDepVals = new Array<unknown>(l)
+    // Reuse arrays - just update contents
     for (let i = 0; i < l; i++) {
       const dep = this.options.deps[i]!
-      prevDepVals[i] = dep.prevState
-      currDepVals[i] = dep.state
+      this._prevDepValsArray[i] = dep.prevState
+      this._currDepValsArray[i] = dep.state
     }
-    this.lastSeenDepValues = currDepVals
-    return {
-      prevDepVals: this._isFirstRun ? undefined : prevDepVals,
-      currDepVals,
-      prevVal: this.prevState ?? undefined,
-    }
+    this.lastSeenDepValues = this._currDepValsArray
+
+    // Update the result object fields
+    this._depValsResult.prevDepVals = this._isFirstRun ? undefined : (this._prevDepValsArray as any)
+    this._depValsResult.currDepVals = this._currDepValsArray as any
+    this._depValsResult.prevVal = this._previousResult
+
+    return this._depValsResult
   }
 
   constructor(options: DerivedOptions<TState, TArr>) {
     this.options = options
 
+    // Initialize reusable arrays
+    const l = options.deps.length
+    this._prevDepValsArray = new Array<unknown>(l)
+    this._currDepValsArray = new Array<unknown>(l)
+    this._depValsResult = {
+      prevDepVals: undefined,
+      currDepVals: this._currDepValsArray as any,
+      prevVal: undefined,
+    }
+
     this._computed = computed(() => {
+      // Update prevState BEFORE computing new value so other deriveds see it
+      this.prevState = this._cachedState
+
+      // Capture previous result BEFORE computing new one so getDepVals sees it
       const depVals = this.getDepVals()
       const result = options.fn(depVals as never)
       this._isFirstRun = false
+
+      // Update cached state and _previousResult AFTER fn runs
+      this._cachedState = result
+      this._previousResult = result
       return result
     })
 
     this._cachedState = this._computed()
+    this.prevState = this._cachedState
   }
 
   get state(): TState {
-    this._cachedState = this._computed()
-    return this._cachedState
+    // Just return the computed value - prevState and _cachedState
+    // are managed in the computed callback
+    return this._computed()
   }
 
   registerOnGraph(
@@ -171,8 +199,9 @@ export class Derived<
   }
 
   recompute = () => {
-    this.prevState = this._cachedState
-    this._cachedState = this._computed()
+    // Trigger recomputation - prevState and _cachedState
+    // are managed in the computed callback
+    this._computed()
 
     this.options.onUpdate?.()
   }
@@ -202,6 +231,10 @@ export class Derived<
     this.registerOnGraph()
     this.checkIfRecalculationNeededDeeply()
 
+    // Note: We don't set up an effect here anymore.
+    // If there are subscriptions, alien-signals effects handle reactive updates.
+    // If there are no subscriptions, we still need eager evaluation - use __flush.
+
     return () => {
       this.unregisterFromGraph()
       for (const cleanup of this._subscriptions) {
@@ -213,8 +246,26 @@ export class Derived<
   subscribe = (listener: Listener<TState>) => {
     this.listeners.add(listener)
     const unsub = this.options.onSubscribe?.(listener, this)
+
+    let prevVal = this.state
+    let isFirstRun = true
+
+    const stopEffect = effectScope(() => {
+      effect(() => {
+        const currentVal = this.state
+        if (isFirstRun) {
+          isFirstRun = false
+          prevVal = currentVal
+          return
+        }
+        listener({ prevVal: prevVal as never, currentVal: currentVal as never })
+        prevVal = currentVal
+      })
+    })
+
     return () => {
       this.listeners.delete(listener)
+      stopEffect()
       unsub?.()
     }
   }

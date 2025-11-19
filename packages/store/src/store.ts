@@ -1,5 +1,5 @@
-import { signal } from 'alien-signals'
-import { __flush } from './scheduler'
+import { signal, effect, effectScope } from 'alien-signals'
+import { queueSignalUpdate, __flush, __storeToDerived } from './scheduler'
 import { isUpdaterFunction } from './types'
 import type { AnyUpdater, Listener, Updater } from './types'
 
@@ -52,8 +52,26 @@ export class Store<
   subscribe = (listener: Listener<TState>) => {
     this.listeners.add(listener)
     const unsub = this.options?.onSubscribe?.(listener, this)
+
+    let prevVal = this.state
+    let isFirstRun = true
+
+    const stopEffect = effectScope(() => {
+      effect(() => {
+        const currentVal = this.state
+        if (isFirstRun) {
+          isFirstRun = false
+          prevVal = currentVal
+          return
+        }
+        listener({ prevVal: prevVal as never, currentVal: currentVal as never })
+        prevVal = currentVal
+      })
+    })
+
     return () => {
       this.listeners.delete(listener)
+      stopEffect()
       unsub?.()
     }
   }
@@ -65,22 +83,33 @@ export class Store<
   setState(updater: TState): void
   setState(updater: TUpdater): void
   setState(updater: Updater<TState> | TUpdater): void {
-    this.prevState = this.state
+    // Queue the signal update - will be applied immediately if not batching,
+    // or deferred until batch ends if batching. Use 'this' as key to only
+    // keep last update per store during batch.
+    queueSignalUpdate(this, () => {
+      const prevState = this.state
 
-    if (this.options?.updateFn) {
-      this.state = this.options.updateFn(this.prevState)(updater as TUpdater)
-    } else {
-      if (isUpdaterFunction(updater)) {
-        this.state = updater(this.prevState)
+      // Update prevState BEFORE setting the signal so that when alien-signals
+      // propagates to computed values, they see the correct prevState
+      this.prevState = prevState
+
+      if (this.options?.updateFn) {
+        this.state = this.options.updateFn(prevState)(updater as TUpdater)
       } else {
-        this.state = updater as TState
+        if (isUpdaterFunction(updater)) {
+          this.state = updater(prevState)
+        } else {
+          this.state = updater as TState
+        }
       }
-    }
 
-    // Always run onUpdate, regardless of batching
-    this.options?.onUpdate?.()
+      this.options?.onUpdate?.()
 
-    // Attempt to flush
-    __flush(this as never)
+      // Only flush if deriveds are mounted (registered on graph)
+      // alien-signals effects handle subscribed deriveds automatically
+      if (__storeToDerived.has(this as unknown as Store<unknown>)) {
+        __flush(this as unknown as Store<unknown>)
+      }
+    })
   }
 }
